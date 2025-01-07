@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"os"
+
 	"github.com/SherClockHolmes/webpush-go"
 	"github.com/go-redis/redis/v8"
+	"github.com/joho/godotenv"
 	"github.com/rs/cors"
-	"net/http"
 )
 
 type SubscriptionRequest struct {
@@ -20,15 +23,15 @@ type SubscriptionItem struct {
 	Subscription webpush.Subscription `json:"subscription"`
 }
 
-var (
-	vapidPublicKey  = "BIuFZlDSdxUG_x8f8GefN6xnoZSJKup73_zR0Vd7HQNWEG2mff5MN-cBkiDBs3NYmHe-Oa9DTBu_D3xBhMFPypo"
-	vapidPrivateKey = "pkWC_AuhakARlt-_bQXH3sEAGiJbWfmqOI_ij-w01vg"
-)
-
 var redisClient *redis.Client
 var ctx = context.Background()
 
 func main() {
+
+	godotenv.Load()
+
+	vapidPublicKey := os.Getenv("VAPID_PUBLIC_KEY")
+	vapidPrivateKey := os.Getenv("VAPID_PRIVATE_KEY")
 
 	redisClient = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
