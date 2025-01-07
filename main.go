@@ -30,6 +30,20 @@ type Configuration struct {
 	AskEvent             string `json:"askEvent,omitempty"`
 }
 
+type UserPreferences struct {
+	Title       string
+	Body        string
+	Icon        string
+	ClickAction string
+}
+
+var userPreferences = UserPreferences{
+	Title:       "Hello, Mehtab Gill!",
+	Body:        "This is your custom notification.",
+	Icon:        "/icons/user123.png",
+	ClickAction: "/dashboard",
+}
+
 var redisClient *redis.Client
 var ctx = context.Background()
 
@@ -46,13 +60,48 @@ func main() {
 
 	defer redisClient.Close()
 
-	http.Handle("/service-worker.js", http.FileServer(http.Dir("./resources/")))
+	http.HandleFunc("/service-worker.js", func(w http.ResponseWriter, r *http.Request) {
+		// Generate dynamic service worker script
+		swScript := fmt.Sprintf(`
+self.addEventListener('push', function(event) {
+    const data = event.data ? event.data.text() : 'No payload';
+
+    const options = {
+        body: data,
+        icon: '/icon.png', // Optional icon
+        vibrate: [100, 50, 100],
+        actions: [
+            { action: 'explore', title: 'Explore this', icon: '/check.png' },
+            { action: 'close', title: 'Close', icon: '/close.png' }
+        ]
+    };
+
+    event.waitUntil(
+        self.registration.showNotification('%s', options)
+    );
+});
+
+self.addEventListener('notificationclick', function(event) {
+    event.notification.close();
+
+    if (event.action === 'explore') {
+        clients.openWindow('https://example.com'); // Change URL
+    } else {
+        console.log('Notification closed');
+    }
+});
+
+`, userPreferences.Title)
+
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Write([]byte(swScript))
+	})
 
 	http.HandleFunc("/info/", func(w http.ResponseWriter, r *http.Request) {
 		//webPushKey := r.URL.Path[len("/info/"):]
 		config := Configuration{
 			ApplicationServerKey: vapidPublicKey,
-			Ask:                  "soft",
+			Ask:                  "hard",
 			AskSelector:          "#subscribe-button",
 			AskEvent:             "click",
 		}
