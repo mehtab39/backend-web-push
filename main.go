@@ -23,6 +23,13 @@ type SubscriptionItem struct {
 	Subscription webpush.Subscription `json:"subscription"`
 }
 
+type Configuration struct {
+	ApplicationServerKey string `json:"applicationServerKey"`
+	Ask                  string `json:"ask"`
+	AskSelector          string `json:"askSelector,omitempty"`
+	AskEvent             string `json:"askEvent,omitempty"`
+}
+
 var redisClient *redis.Client
 var ctx = context.Background()
 
@@ -40,6 +47,21 @@ func main() {
 	defer redisClient.Close()
 
 	http.Handle("/service-worker.js", http.FileServer(http.Dir("./resources/")))
+
+	http.HandleFunc("/info/", func(w http.ResponseWriter, r *http.Request) {
+		//webPushKey := r.URL.Path[len("/info/"):]
+		config := Configuration{
+			ApplicationServerKey: vapidPublicKey,
+			Ask:                  "soft",
+			AskSelector:          "#subscribe-button",
+			AskEvent:             "click",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(config); err != nil {
+			http.Error(w, "Failed to encode configuration", http.StatusInternalServerError)
+			return
+		}
+	})
 
 	http.HandleFunc("/subscribe", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
