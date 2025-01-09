@@ -6,12 +6,21 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
+	"web-push/services"
 
 	"github.com/SherClockHolmes/webpush-go"
-	"github.com/go-redis/redis/v8"
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/joho/godotenv"
 	"github.com/rs/cors"
+	"golang.org/x/crypto/bcrypt"
 )
+
+type Preferences struct {
+	Ask         string `json:"Ask"`
+	AskSelector string `json:"AskSelector"`
+	AskEvent    string `json:"AskEvent"`
+}
 
 type SubscriptionRequest struct {
 	Subscription webpush.Subscription `json:"subscription"`
@@ -44,21 +53,36 @@ var userPreferences = UserPreferences{
 	ClickAction: "/dashboard",
 }
 
-var redisClient *redis.Client
-var ctx = context.Background()
+var (
+	secret = []byte("my_secret_key")
+	ctx    = context.Background()
+)
+
+type User struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Email    string `json:"email"`
+}
+
+type Claims struct {
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
 
 func main() {
 
 	godotenv.Load()
 
+	services.InitRedis()
+
 	vapidPublicKey := os.Getenv("VAPID_PUBLIC_KEY")
 	vapidPrivateKey := os.Getenv("VAPID_PRIVATE_KEY")
 
-	redisClient = redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	defer services.CloseRedis()
 
-	defer redisClient.Close()
+	http.HandleFunc("/register", registerHandler)
+	http.HandleFunc("/login", loginHandler)
+	http.HandleFunc("/preferences", preferencesHandler)
 
 	http.HandleFunc("/service-worker.js", func(w http.ResponseWriter, r *http.Request) {
 		// Generate dynamic service worker script
@@ -98,18 +122,15 @@ self.addEventListener('notificationclick', function(event) {
 	})
 
 	http.HandleFunc("/info/", func(w http.ResponseWriter, r *http.Request) {
-		//webPushKey := r.URL.Path[len("/info/"):]
-		config := Configuration{
-			ApplicationServerKey: vapidPublicKey,
-			Ask:                  "hard",
-			AskSelector:          "#subscribe-button",
-			AskEvent:             "click",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(config); err != nil {
-			http.Error(w, "Failed to encode configuration", http.StatusInternalServerError)
+		userKey := r.URL.Path[len("/info/"):]
+		prefs, err := services.Rdb.HGetAll(ctx, fmt.Sprintf("preferences:%s", userKey)).Result()
+		if err != nil {
+			http.Error(w, "Error fetching preferences", http.StatusInternalServerError)
 			return
 		}
+		prefs["ApplicationServerKey"] = vapidPublicKey
+
+		json.NewEncoder(w).Encode(prefs)
 	})
 
 	http.HandleFunc("/subscribe", func(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +151,7 @@ self.addEventListener('notificationclick', function(event) {
 			return
 		}
 
-		err = redisClient.HSet(ctx, "subscriptions", req.UserID, subscriptionData).Err()
+		err = services.Rdb.HSet(ctx, "subscriptions", req.UserID, subscriptionData).Err()
 		if err != nil {
 			http.Error(w, "Failed to store subscription in Redis", http.StatusInternalServerError)
 			return
@@ -146,7 +167,7 @@ self.addEventListener('notificationclick', function(event) {
 			return
 		}
 
-		subscriptions, err := redisClient.HGetAll(ctx, "subscriptions").Result()
+		subscriptions, err := services.Rdb.HGetAll(ctx, "subscriptions").Result()
 		if err != nil {
 			http.Error(w, "Failed to fetch subscriptions from Redis", http.StatusInternalServerError)
 			return
@@ -164,7 +185,7 @@ self.addEventListener('notificationclick', function(event) {
 			return
 		}
 
-		subscriptions, err := redisClient.HGetAll(ctx, "subscriptions").Result()
+		subscriptions, err := services.Rdb.HGetAll(ctx, "subscriptions").Result()
 		if err != nil {
 			http.Error(w, "Failed to fetch subscriptions from Redis", http.StatusInternalServerError)
 			return
@@ -195,9 +216,138 @@ self.addEventListener('notificationclick', function(event) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("Notifications sent to all subscriptions."))
 	})
-
 	fmt.Println("Server starting on http://localhost:8080")
 	if err := http.ListenAndServe(":8080", cors.Default().Handler(http.DefaultServeMux)); err != nil {
 		panic(err)
+	}
+
+}
+
+func registerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var user User
+	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Error hashing password", http.StatusInternalServerError)
+		return
+	}
+
+	user.Password = string(passwordHash)
+	key := fmt.Sprintf("user:%s", user.Username)
+
+	if err := services.Rdb.HSet(ctx, key, map[string]interface{}{
+		"username":      user.Username,
+		"password_hash": user.Password,
+		"email":         user.Email,
+		"created_at":    time.Now().String(),
+	}).Err(); err != nil {
+		http.Error(w, "Error saving user", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "User registered successfully",
+	})
+}
+
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var user User
+	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	key := fmt.Sprintf("user:%s", user.Username)
+	passwordHash, err := services.Rdb.HGet(ctx, key, "password_hash").Result()
+	if err != nil {
+		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+		return
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(user.Password)) != nil {
+		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+		return
+	}
+
+	claims := &Claims{
+		Username: user.Username,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * 24)),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(secret)
+	if err != nil {
+		http.Error(w, "Error creating token", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"token": tokenString,
+	})
+}
+
+func preferencesHandler(w http.ResponseWriter, r *http.Request) {
+	tokenStr := r.Header.Get("Authorization")
+	if tokenStr == "" {
+		http.Error(w, "Missing token", http.StatusUnauthorized)
+		return
+	}
+
+	token, err := jwt.ParseWithClaims(tokenStr[len("Bearer "):], &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		return secret, nil
+	})
+	if err != nil || !token.Valid {
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	claims := token.Claims.(*Claims)
+	userKey := fmt.Sprintf("preferences:%s", claims.Username)
+
+	if r.Method == http.MethodGet {
+		fmt.Printf("Failed to decode subscription: %v\n", userKey)
+		prefs, err := services.Rdb.HGetAll(ctx, userKey).Result()
+		if err != nil {
+			http.Error(w, "Error fetching preferences", http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(prefs)
+		return
+	}
+
+	if r.Method == http.MethodPut {
+		var prefs Preferences
+		if err := json.NewDecoder(r.Body).Decode(&prefs); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if err := services.Rdb.HSet(ctx, userKey, map[string]interface{}{
+			"Ask":         prefs.Ask,
+			"AskSelector": prefs.AskSelector,
+			"AskEvent":    prefs.AskEvent,
+		}).Err(); err != nil {
+			http.Error(w, "Error saving preferences", http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Preferences updated successfully",
+		})
 	}
 }
