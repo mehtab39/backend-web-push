@@ -47,6 +47,12 @@ type UserPreferences struct {
 	ClickAction string
 }
 
+type NotificationAction struct {
+	Action string `json:"action"`
+	Title  string `json:"title"`
+	Icon   string `json:"icon,omitempty"`
+}
+
 var userPreferences = UserPreferences{
 	Title:       "Hello, Mehtab Gill!",
 	Body:        "This is your custom notification.",
@@ -90,19 +96,19 @@ func main() {
 		swScript := fmt.Sprintf(`
 self.addEventListener('push', function(event) {
     const data = event.data ? event.data.text() : 'No payload';
+	const text  =  event.data.text();
+	const info = JSON.parse(text)
 
     const options = {
-        body: data,
+        body: info.body,
         icon: '/icon.png', // Optional icon
         vibrate: [100, 50, 100],
-        actions: [
-            { action: 'explore', title: 'Explore this', icon: '/check.png' },
-            { action: 'close', title: 'Close', icon: '/close.png' }
-        ]
+        actions: info.actions
     };
 
     event.waitUntil(
-        self.registration.showNotification('%s', options)
+        self.registration.showNotification(info.title || 
+		"%s", options)
     );
 });
 
@@ -224,6 +230,17 @@ self.addEventListener('notificationclick', function(event) {
 			return
 		}
 
+		var req struct {
+			Title   string               `json:"Title"`
+			Message string               `json:"message"`
+			Actions []NotificationAction `json:"actions,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
 		subscriptions, err := services.Rdb.HGetAll(ctx, "subscriptions").Result()
 		if err != nil {
 			http.Error(w, "Failed to fetch subscriptions from Redis", http.StatusInternalServerError)
@@ -237,8 +254,16 @@ self.addEventListener('notificationclick', function(event) {
 				continue
 			}
 
+			payload := map[string]interface{}{
+				"title":   req.Title,
+				"body":    req.Message,
+				"actions": req.Actions,
+			}
+
+			payloadJSON, _ := json.Marshal(payload)
+
 			go func(sub webpush.Subscription) {
-				resp, err := webpush.SendNotification([]byte("Hello! This is a broadcast notification."), &sub, &webpush.Options{
+				resp, err := webpush.SendNotification([]byte(payloadJSON), &sub, &webpush.Options{
 					VAPIDPublicKey:  vapidPublicKey,
 					VAPIDPrivateKey: vapidPrivateKey,
 					TTL:             30,
@@ -263,7 +288,10 @@ self.addEventListener('notificationclick', function(event) {
 		}
 
 		var req struct {
-			UserID string `json:"userid"`
+			UserID  string               `json:"userid"`
+			Message string               `json:"message"`
+			Title   string               `json:"title"`
+			Actions []NotificationAction `json:"actions,omitempty"`
 		}
 
 		// Decode the JSON request body
@@ -283,6 +311,13 @@ self.addEventListener('notificationclick', function(event) {
 			return
 		}
 
+		payload := map[string]interface{}{
+			"title":   req.Title,
+			"body":    req.Message,
+			"actions": req.Actions,
+		}
+		payloadJSON, _ := json.Marshal(payload)
+
 		// Parse the subscription data into a webpush.Subscription struct
 		var subscription webpush.Subscription
 		if err := json.Unmarshal([]byte(subData), &subscription); err != nil {
@@ -293,7 +328,7 @@ self.addEventListener('notificationclick', function(event) {
 
 		// Send the notification in a goroutine
 		go func(sub webpush.Subscription) {
-			resp, err := webpush.SendNotification([]byte("Hello! This is a broadcast notification."), &sub, &webpush.Options{
+			resp, err := webpush.SendNotification([]byte(payloadJSON), &sub, &webpush.Options{
 				VAPIDPublicKey:  vapidPublicKey,
 				VAPIDPrivateKey: vapidPrivateKey,
 				TTL:             30,
