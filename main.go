@@ -224,6 +224,38 @@ self.addEventListener('notificationclick', function(event) {
 		}
 	})
 
+	http.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+			return
+		}
+		userID := r.URL.Path[len("/users/"):]
+		if userID == "" {
+			http.Error(w, "User ID is required", http.StatusBadRequest)
+			return
+		}
+
+		isSubscribed, err := services.Rdb.HExists(ctx, "subscriptions", userID).Result()
+		if err != nil {
+			http.Error(w, "Failed to check subscription status", http.StatusInternalServerError)
+			return
+		}
+
+		response := struct {
+			UserID       string `json:"userID"`
+			IsSubscribed bool   `json:"isSubscribed"`
+		}{
+			UserID:       userID,
+			IsSubscribed: isSubscribed,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			return
+		}
+	})
+
 	http.HandleFunc("/notify", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
