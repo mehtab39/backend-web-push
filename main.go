@@ -263,7 +263,8 @@ self.addEventListener('notificationclick', function(event) {
 		}
 
 		var req struct {
-			Title   string               `json:"Title"`
+			Users   []string             `json:"users"`
+			Title   string               `json:"title"`
 			Message string               `json:"message"`
 			Actions []NotificationAction `json:"actions,omitempty"`
 		}
@@ -273,10 +274,19 @@ self.addEventListener('notificationclick', function(event) {
 			return
 		}
 
-		subscriptions, err := services.Rdb.HGetAll(ctx, "subscriptions").Result()
-		if err != nil {
-			http.Error(w, "Failed to fetch subscriptions from Redis", http.StatusInternalServerError)
-			return
+		subscriptions := make(map[string]string)
+
+		for _, userID := range req.Users {
+			subscription, err := services.Rdb.HGet(ctx, "subscriptions", userID).Result()
+			if err != nil {
+				if err == redis.Nil {
+					// User not found in subscriptions
+					continue
+				}
+				http.Error(w, "Error fetching subscriptions", http.StatusInternalServerError)
+				return
+			}
+			subscriptions[userID] = subscription
 		}
 
 		for _, subData := range subscriptions {
@@ -311,73 +321,6 @@ self.addEventListener('notificationclick', function(event) {
 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("Notifications sent to all subscriptions."))
-	})
-
-	http.HandleFunc("/notify-user", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req struct {
-			UserID  string               `json:"userid"`
-			Message string               `json:"message"`
-			Title   string               `json:"title"`
-			Actions []NotificationAction `json:"actions,omitempty"`
-		}
-
-		// Decode the JSON request body
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		// Fetch the subscription data from Redis
-		subData, err := services.Rdb.HGet(ctx, "subscriptions", req.UserID).Result()
-		if err != nil {
-			if err == redis.Nil {
-				http.Error(w, "Subscription not found for the given user", http.StatusNotFound)
-			} else {
-				http.Error(w, "Failed to fetch subscription from Redis", http.StatusInternalServerError)
-			}
-			return
-		}
-
-		payload := map[string]interface{}{
-			"title":   req.Title,
-			"body":    req.Message,
-			"actions": req.Actions,
-		}
-		payloadJSON, _ := json.Marshal(payload)
-
-		// Parse the subscription data into a webpush.Subscription struct
-		var subscription webpush.Subscription
-		if err := json.Unmarshal([]byte(subData), &subscription); err != nil {
-			http.Error(w, "Failed to parse subscription data", http.StatusInternalServerError)
-			fmt.Printf("Failed to decode subscription: %v\n", err)
-			return
-		}
-
-		// Send the notification in a goroutine
-		go func(sub webpush.Subscription) {
-			resp, err := webpush.SendNotification([]byte(payloadJSON), &sub, &webpush.Options{
-				VAPIDPublicKey:  vapidPublicKey,
-				VAPIDPrivateKey: vapidPrivateKey,
-				TTL:             30,
-				HTTPClient:      &http.Client{},
-			})
-
-			if err != nil {
-				fmt.Printf("Failed to send notification: %v\n", err)
-				return
-			}
-			defer resp.Body.Close()
-			fmt.Println("Notification sent successfully!")
-		}(subscription)
-
-		// Send a success response
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(fmt.Sprintf("Notification sent to the user %s", req.UserID)))
 	})
 
 	fmt.Println("Server starting on http://localhost:8080")
